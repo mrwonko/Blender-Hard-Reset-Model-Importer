@@ -63,14 +63,14 @@ def toColor(s):
 		return False, [0, 0, 0]
 	return True, [float(values[0]), float(values[1]), float(values[2])]
 
-UnhandlesChunkKeys = []
+UnhandledChunkKeys = []
 # a chunk will translate into a mesh/object pair in Blender.
 class Chunk:
 	def __init__(self):
 		self.message = ""
-		self.startIndex = -1 # first (triangle) index belonging to this chunk
-		self.primCount = -1 # amount of (triangle) indices belonging to this chunk
-		self.baseIndex = -1 # indices must be offset by this much - allows for more than 2^16 vertices to be used, just not /per chunk/
+		self.startIndex = -1 # first (triangle) index belonging to this chunk - pretty much required, I guess
+		self.primCount = -1 # amount of (triangle) indices belonging to this chunk - pretty much required, I guess
+		self.baseIndex = 0 # indices must be offset by this much - allows for more than 2^16 vertices to be used, just not /per chunk/
 		self.diffuse = "" # diffuse texture
 		self.specular = "" # specular texture
 		self.normal = "" # normal map texture
@@ -78,13 +78,7 @@ class Chunk:
 		self.material = "" # material, for physics (esp. electricity) I guess
 		# todo: add more!
 	
-	def loadFromFile(self, file):
-		if file.readline().strip("\n") != "[Chunk]":
-			self.message = "Expected chunk definition in file did not start with [Chunk]!"
-			return False
-		# read 
-		numChunks = -1
-		
+	def loadFromMeta(self, file):
 		#read lines while there are any interesting ones
 		while peek(file) not in ["[", ""]: # next definition, EOF
 			# read line
@@ -148,9 +142,9 @@ class Chunk:
 				"""
 			
 			# unhandled key?
-			if key not in UnhandlesChunkKeys: # only warn once
+			if key not in UnhandledChunkKeys: # only warn once
 				print("Info: Unhandled Chunk Key \"%s\"" % (key))
-				UnhandlesMeshKeys.append(key)
+				UnhandledChunkKeys.append(key)
 				continue
 		if self.startIndex == -1:
 			self.message = "No StartIndex defined!"
@@ -160,7 +154,7 @@ class Chunk:
 			return False
 		return True
 	
-	def toBlender(self, allVertices, allIndices, name):
+	def toBlender(self, geometry, name):
 		vertices = [] # not all the vertices are used...
 		indices = [] # same for the indices, and they're also different since the vertices are different.
 		indexMap = {} # which old vertex index maps to which new one?
@@ -169,13 +163,13 @@ class Chunk:
 			triangle = [0, 0, 0]
 			# I don't want the mesh to contain unused vertices, so I need to iterate through the indices and only use those vertices.
 			for vertexIndex in range(3):
-				originalIndex = allIndices[self.startIndex + triangleIndex * 3 + vertexIndex] + self.baseIndex
+				originalIndex = geometry.indices[self.startIndex + triangleIndex * 3 + vertexIndex] + self.baseIndex
 				# that means I need to map the old indices (of the complete vertex list) to new ones (of this mesh's vertex list)
 				# if this vertex has not yet been used...
 				if originalIndex not in indexMap:
 					# ... I need to add it to the list of used vertices and map its index
 					indexMap[originalIndex] = len(vertices)
-					vertices.append(allVertices[originalIndex].position)
+					vertices.append(geometry.vertices[originalIndex].position)
 				# now it's just a matter of looking up the correct index.
 				triangle[vertexIndex] = indexMap[originalIndex]
 			indices.append(triangle)
@@ -185,22 +179,20 @@ class Chunk:
 		bpy.context.scene.objects.link(self.object) # add to current scene
 		return True
 
-UnhandlesMeshKeys = []
+UnhandledMeshKeys = []
 # more like a group of mesh objects, though they may possibly contain only one (or none?)
 class Mesh:
 	def __init__(self):
 		self.message = ""
-		self.chunks = []
+		
 		self.name = ""
 		self.childNum = 0 # not sure what this is
-	
-	def loadFromFile(self, file):
-		if file.readline().strip("\n") != "[Mesh]":
-			self.message = "Mesh definition in file did not start with [Mesh]!"
-			return False
-		# read 
-		chunkCount = -1
 		
+		# how many chunks, starting from which index?
+		self.numChunks = -1
+		self.chunkStart = -1
+	
+	def loadFromMeta(self, file):
 		#read lines while there are any interesting ones
 		while peek(file) not in ["[", ""]: # next definition, EOF
 			# read line
@@ -218,13 +210,10 @@ class Mesh:
 			
 			# use
 			if key == "ChunkCount":
-				chunkCount = int(value)
+				self.numChunks = int(value)
 				continue
 			if key == "ChunkStart":
-				chunkStart = int(value)
-				if chunkStart != 0:
-					self.message = "chunkStart is %d, not 0. I don't know what that means, except that I probably can't read this file properly." % (chunkStart)
-					return False
+				self.chunkStart = int(value)
 				continue
 			if key == "Name":
 				success, self.name = toString(value)
@@ -239,27 +228,26 @@ class Mesh:
 				# I don't need to read bounds - I just have to save 'em.
 				continue
 			# unhandled key?
-			if key not in UnhandlesMeshKeys: # only warn once
+			if key not in UnhandledMeshKeys: # only warn once
 				print("Info: Unhandled Mesh Key \"%s\"" % (key))
-				UnhandlesMeshKeys.append(key)
+				UnhandledMeshKeys.append(key)
 				continue
-		if chunkCount == -1:
+		
+		if self.numChunks == -1:
 			self.message = "No ChunkCount defined!"
 			return False
-		for i in range(chunkCount):
-			chunk = Chunk()
-			if not chunk.loadFromFile(file):
-				self.message = "Error reading Chunk %d: %s" % (i, chunk.message)
-				return False
-			self.chunks.append(chunk)
+		if self.chunkStart == -1:
+			self.message = "No ChunkStart defined!"
+			return False
+		
 		return True
 	
-	def toBlender(self, vertices, indices):
-		""" Creates a Group (empty) and adds  """
+	def toBlender(self, geometry):
+		""" Creates a Group (empty) and adds the children """
 		self.object = bpy.data.objects.new(self.name, None) # no data assigned to this object -> empty
 		bpy.context.scene.objects.link(self.object) # add to current scene
-		for index, chunk in enumerate(self.chunks):
-			if not chunk.toBlender(vertices, indices, "%s_%d" % (self.name, index)):
+		for index, chunk in enumerate(geometry.chunks[self.chunkStart:self.chunkStart+self.numChunks]):
+			if not chunk.toBlender(geometry, "%s_%d" % (self.name, index)):
 				self.message = chunk.message
 				return False
 			chunk.object.parent = self.object
@@ -270,7 +258,7 @@ class Vertex:
 		self.position = [0, 0, 0]
 		# what are the other values saved?
 	
-	def loadFromFile(self, file):
+	def loadFromRhm(self, file):
 		bindata = file.read(32) # a vertex is 32 bytes long.
 		if len(bindata) < 32:
 			return False, "Unexpected End of File"
@@ -279,17 +267,96 @@ class Vertex:
 			self.position[i] = data[i]
 		return True, ""
 
-unhandledGeometryKeys = []
+UnhandledGeometryKeys = []
+class Geometry:
+	def __init__(self):
+		# error message, if any
+		self.message = ""
+		
+		self.numVertices = -1
+		self.numIndices = -1
+		self.numMeshes = -1
+		# I wonder why there is no NumChunks?
+		
+		self.meshes = []
+		self.chunks = []
+		
+		self.vertices = []
+		self.indices = () # all the indices, not grouped
+	
+	def loadFromMeta(self, file):
+		while peek(file) not in ["[", ""]:
+			line = file.readline()
+			if line == "\n":
+				continue
+			line = line.strip("\n")
+			
+			# split at =
+			key, value = toKeyValue(line)
+			if not key:
+				self.message = "line without ="
+				return False
+			
+			#   use
+			if key == "Meshes":
+				self.numMeshes = int(value)
+				continue
+			if key == "Vertices":
+				self.numVertices = int(value)
+				continue
+			if key == "Indices":
+				self.numIndices = int(value)
+				continue
+			# unhandled key?
+			if key not in UnhandledGeometryKeys: # only warn once
+				print("Info: Unhandled Geometry Key \"%s\"" % (key))
+				UnhandledGeometryKeys.append(key)
+				continue
+		return True
+	
+	def loadFromRhm(self, file):
+		# read vertices
+		for i in range(self.numVertices):
+			v = Vertex()
+			success, message = v.loadFromRhm(file)
+			if not success:
+				self.message = "Error reading vertex %d: %s" % (i, message)
+				return False
+			self.vertices.append(v)
+		print("Read %d vertices" % self.numVertices)
+		
+		# read triangles
+		bindata = file.read(2*self.numIndices)
+		if len(bindata) < 2*self.numIndices:
+			self.message = "Error reading indices: Unexpected end of file!"
+			return False
+		self.indices = struct.unpack("%dH" % self.numIndices, bindata) # 3 unsigned shorts (2 byte - only up to 65536 vertices!)
+		print("Read %d indices" % self.numIndices)
+		
+		# read check sum
+		checksumBin = file.read(4)
+		if len(checksumBin) < 4:
+			self.message = "Error reading checksum: Unexpected end of file!"
+			return False
+		checksum = struct.unpack("i", checksumBin)
+		print("Checksum (?): %d" % checksum)
+		
+		return True
+	
+	def toBlender(self):
+		for mesh in self.meshes:
+			if not mesh.toBlender(self):
+				self.message = mesh.message
+				return False
+		return True
+
+unhandledBlocks = []
 class HRImporter:
 	def __init__(self):	
 		self.message = ""
-		self.numVertices = -1
-		self.numIndices = -1
-		self.meshes = []
-		self.vertices = [] # Vertex
-		self.indices = () # all the indices, not grouped
+		self.geometry = None
 	
-	def loadModel(self, filepath):
+	def importModel(self, filepath):
 		# strip extension
 		pathWithoutExtension, extension = os.path.splitext(filepath)
 		# is this a .meta file?
@@ -317,77 +384,64 @@ class HRImporter:
 		with open(filepath, "r") as file:
 			# most common error
 			self.message = "Invalid/unsupported file (see console for details)"
-			if file.readline().strip("\n") != "[Geometry]":
-				print(".meta file does not start with [Geometry]" % line)
-				return False
-			numMeshes = -1
 			
-			while peek(file) not in ["[", ""]:
+			while True:
 				line = file.readline()
-				if line == "\n":
+				if line == "":
+					break
+				if line == "\n": # empty line - might happen?
 					continue
 				line = line.strip("\n")
-				# split at =
-				key, value = toKeyValue(line)
-				if not key:
-					self.message = "line without ="
-					return False
-				#   use
-				if key == "Meshes":
-					numMeshes = int(value)
+				
+				if line == "[Geometry]":
+					if self.geometry:
+						print("Multiple [Geometry] blocks!")
+						return False
+					self.geometry = Geometry()
+					if not self.geometry.loadFromMeta(file):
+						print("Error reading [Geometry] block:\n%s" % self.geometry.message)
+						return False
 					continue
-				if key == "Vertices":
-					self.numVertices = int(value)
+				
+				if line == "[Mesh]":
+					mesh = Mesh()
+					if not mesh.loadFromMeta(file):
+						print("Error reading [Mesh] block:\n%s" % (i, mesh.message))
+						return False
+					self.geometry.meshes.append(mesh)
 					continue
-				if key == "Indices":
-					self.numIndices = int(value)
+				
+				if line == "[Chunk]":
+					chunk = Chunk()
+					if not chunk.loadFromMeta(file):
+						print("Error reading [Chunk] block:\n%s" % (i, chunk.message))
+						return False
+					self.geometry.chunks.append(chunk)
 					continue
-				# unhandled key?
-				if key not in unhandledGeometryKeys: # only warn once
-					print("Info: Unhandled Geometry Key \"%s\"" % (key))
-					unhandledGeometryKeys.append(key)
+				
+				# warn about unhandled blocks - but only once.
+				if line not in unhandledBlocks:
+					unhandledBlocks.append(line)
+					print("Warning: Unhandled block: %s" % line)
+					# skip this
+					while peek(file) not in ["[", ""]:
+						file.readline()
 					continue
 			
-			# read meshes
-			for i in range(numMeshes):
-				mesh = Mesh()
-				if not mesh.loadFromFile(file):
-					print("Error reading mesh %d:\n%s" % (i, mesh.message))
-					return False
-				self.meshes.append(mesh)
+			# check if the amount of meshes is correct
+			if len(self.geometry.meshes) != self.geometry.numMeshes:
+				print("Error: Number of [Mesh] blocks does not match Geometry.Meshes! (%d should be %d)" % (len(self.geometry.meshes), self.geometry.numMeshes) )
+				return False
 			
-			# there's nothing else in the file, as far as I know.
 			return True
 		self.message = "Could not open " + filepath
 		return False
 	
 	def loadRhm(self, filepath):
 		with open(filepath, "rb") as file:
-			# read vertices
-			for i in range(self.numVertices):
-				v = Vertex()
-				success, message = v.loadFromFile(file)
-				if not success:
-					self.message = "Error reading vertex %d: %s" % (i, message)
-					return False
-				self.vertices.append(v)
-			print("Read %d vertices" % self.numVertices)
-			
-			# read triangles
-			bindata = file.read(2*self.numIndices)
-			if len(bindata) < 2*self.numIndices:
-				self.message = "Error reading indices: Unexpected end of file!"
+			if not self.geometry.loadFromRhm(file):
+				self.message = "Error reading .rhm file:\n%s" % self.geometry.message
 				return False
-			self.indices = struct.unpack("%dH" % self.numIndices, bindata) # 3 unsigned shorts (2 byte - only up to 65536 vertices!)
-			print("Read %d indices" % self.numIndices)
-			
-			# read check sum
-			checksumBin = file.read(4)
-			if len(checksumBin) < 4:
-				self.message = "Error reading checksum: Unexpected end of file!"
-				return False
-			checksum = struct.unpack("i", checksumBin)
-			print("Checksum (?): %d" % checksum)
 			
 			# file should be over now
 			if len(file.read(1)) != 0:
@@ -402,10 +456,9 @@ class HRImporter:
 		# Before adding any meshes or armatures go into Object mode.
 		if bpy.ops.object.mode_set.poll():
 			bpy.ops.object.mode_set(mode='OBJECT')
-		for mesh in self.meshes:
-			if not mesh.toBlender(self.vertices, self.indices):
-				self.message = mesh.message
-				return False
+		if not self.geometry.toBlender():
+			self.message = self.geometry.message
+			return False
 		return True
 
 from bpy.props import StringProperty, BoolProperty
@@ -422,7 +475,7 @@ class IMPORT_HR_META(bpy.types.Operator):
 
 		def execute(self, context):
 			importer = HRImporter()
-			if not importer.loadModel(self.filepath):
+			if not importer.importModel(self.filepath):
 				self.report({'ERROR'}, importer.message)
 			return {'FINISHED'}
 
