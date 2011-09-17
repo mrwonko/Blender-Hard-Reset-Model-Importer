@@ -70,7 +70,7 @@ class Chunk:
 		self.message = ""
 		self.startIndex = -1 # first (triangle) index belonging to this chunk
 		self.primCount = -1 # amount of (triangle) indices belonging to this chunk
-		self.baseIndex = None # ???
+		self.baseIndex = -1 # indices must be offset by this much - allows for more than 2^16 vertices to be used, just not /per chunk/
 		self.diffuse = "" # diffuse texture
 		self.specular = "" # specular texture
 		self.normal = "" # normal map texture
@@ -160,7 +160,29 @@ class Chunk:
 			return False
 		return True
 	
-	def toBlender(self, vertices, indices, chunkIndex, mesh):
+	def toBlender(self, allVertices, allIndices, name):
+		vertices = [] # not all the vertices are used...
+		indices = [] # same for the indices, and they're also different since the vertices are different.
+		indexMap = {} # which old vertex index maps to which new one?
+		self.mesh = bpy.data.meshes.new(name)
+		for triangleIndex in range(self.primCount): # need to build tuples, so I can't really iterate
+			triangle = [0, 0, 0]
+			# I don't want the mesh to contain unused vertices, so I need to iterate through the indices and only use those vertices.
+			for vertexIndex in range(3):
+				originalIndex = allIndices[self.startIndex + triangleIndex * 3 + vertexIndex] + self.baseIndex
+				# that means I need to map the old indices (of the complete vertex list) to new ones (of this mesh's vertex list)
+				# if this vertex has not yet been used...
+				if originalIndex not in indexMap:
+					# ... I need to add it to the list of used vertices and map its index
+					indexMap[originalIndex] = len(vertices)
+					vertices.append(allVertices[originalIndex].position)
+				# now it's just a matter of looking up the correct index.
+				triangle[vertexIndex] = indexMap[originalIndex]
+			indices.append(triangle)
+		self.mesh.from_pydata(vertices, [], indices) # vertices, edges, faces
+		
+		self.object = bpy.data.objects.new(name, self.mesh) # no data assigned to this object -> empty
+		bpy.context.scene.objects.link(self.object) # add to current scene
 		return True
 
 UnhandlesMeshKeys = []
@@ -205,7 +227,7 @@ class Mesh:
 					return False
 				continue
 			if key == "Name":
-				success, self.Name = toString(value)
+				success, self.name = toString(value)
 				if not success:
 					self.message = "Name is no string"
 					return False
@@ -233,9 +255,14 @@ class Mesh:
 		return True
 	
 	def toBlender(self, vertices, indices):
+		""" Creates a Group (empty) and adds  """
+		self.object = bpy.data.objects.new(self.name, None) # no data assigned to this object -> empty
+		bpy.context.scene.objects.link(self.object) # add to current scene
 		for index, chunk in enumerate(self.chunks):
-			if not chunk.toBlender(vertices, indices, index, self):
+			if not chunk.toBlender(vertices, indices, "%s_%d" % (self.name, index)):
+				self.message = chunk.message
 				return False
+			chunk.object.parent = self.object
 		return True
 
 class Vertex:
@@ -325,7 +352,7 @@ class HRImporter:
 			for i in range(numMeshes):
 				mesh = Mesh()
 				if not mesh.loadFromFile(file):
-					print("Error reading mesh %d:\n%s" % (i, Mesh.message))
+					print("Error reading mesh %d:\n%s" % (i, mesh.message))
 					return False
 				self.meshes.append(mesh)
 			
@@ -336,11 +363,6 @@ class HRImporter:
 	
 	def loadRhm(self, filepath):
 		with open(filepath, "rb") as file:
-			# more indices than can be indexed with a 2 byte unsigned short?
-			if self.numVertices > pow(2, 16):
-				print("Warning: More than %d vertices, some cannot be indexed!" % pow(2, 16))
-				# ignore them?
-			
 			# read vertices
 			for i in range(self.numVertices):
 				v = Vertex()
