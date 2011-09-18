@@ -42,7 +42,7 @@ def toKeyValue(line):
 	# split at =
 	key, value = line.split("=", 1)
 	if not value:
-		return
+		return None, None
 	# prettify, return
 	return key.strip(), value
 
@@ -50,7 +50,7 @@ def toKeyValue(line):
 def toString(s):
 	s = s.strip()
 	if s[:1] != '"' or s[-1:] != '"':
-		return False
+		return False, None
 	return True, s[1:-1]
 
 def toColor(s):
