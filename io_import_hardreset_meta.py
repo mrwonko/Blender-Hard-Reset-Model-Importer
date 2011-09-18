@@ -63,6 +63,33 @@ def toColor(s):
 		return False, [0, 0, 0]
 	return True, [float(values[0]), float(values[1]), float(values[2])]
 
+# halfFloat (16 bit) read as Short to Float
+# from http://forums.devshed.com/python-programming-11/converting-half-precision-floating-point-numbers-from-hexidecimal-to-decimal-576842.html
+def halfToFloat(h):
+    sign = int((h >> 15) & 0x00000001)
+    exponent = int((h >> 10) & 0x0000001f)
+    fraction = int(h & 0x000003ff)
+
+    if exponent == 0:
+       if fraction == 0:
+          return int(sign << 31)
+       else:
+          while not (fraction & 0x00000400):
+             fraction <<= 1
+             exponent -= 1
+          exponent += 1
+          fraction &= ~0x00000400
+    elif exponent == 31:
+       if fraction == 0:
+          return int((sign << 31) | 0x7f800000)
+       else:
+          return int((sign << 31) | 0x7f800000 | (fraction << 13))
+
+    exponent = exponent + (127 -15)
+    fraction = fraction << 13
+
+    return struct.unpack("f", struct.pack("I", (sign << 31) | (exponent << 23) | fraction))[0]
+
 UnhandledChunkKeys = []
 # a chunk will translate into a mesh/object pair in Blender.
 class Chunk:
@@ -155,7 +182,7 @@ class Chunk:
 		return True
 	
 	def toBlender(self, geometry, name):
-		vertices = [] # not all the vertices are used...
+		vertexPositions = [] # not all the vertices are used...
 		indices = [] # same for the indices, and they're also different since the vertices are different.
 		indexMap = {} # which old vertex index maps to which new one?
 		self.mesh = bpy.data.meshes.new(name)
@@ -168,12 +195,26 @@ class Chunk:
 				# if this vertex has not yet been used...
 				if originalIndex not in indexMap:
 					# ... I need to add it to the list of used vertices and map its index
-					indexMap[originalIndex] = len(vertices)
-					vertices.append(geometry.vertices[originalIndex].position)
+					indexMap[originalIndex] = len(vertexPositions)
+					vertexPositions.append(geometry.vertices[originalIndex].position)
 				# now it's just a matter of looking up the correct index.
 				triangle[vertexIndex] = indexMap[originalIndex]
 			indices.append(triangle)
-		self.mesh.from_pydata(vertices, [], indices) # vertices, edges, faces
+		self.mesh.from_pydata(vertexPositions, [], indices) # vertices, edges, faces
+		
+		#UV Data
+		assert(len(self.mesh.uv_textures) == 0)
+		uv_texture = self.mesh.uv_textures.new() # create UV Texture - it contains UV Mapping data
+		assert(len(uv_texture.data) == self.primCount) # the data should already exist, but zeroed.
+		for triangleIndex in range(self.primCount):
+			uv = [None, None, None]
+			for vertexIndex in range(3):
+				index = geometry.indices[self.startIndex + triangleIndex * 3 + vertexIndex] + self.baseIndex
+				vertex = geometry.vertices[index]
+				uv[vertexIndex] = vertex.uv
+			uv_texture.data[triangleIndex].uv1 = uv[0]
+			uv_texture.data[triangleIndex].uv2 = uv[1]
+			uv_texture.data[triangleIndex].uv3 = uv[2]
 		
 		self.object = bpy.data.objects.new(name, self.mesh) # no data assigned to this object -> empty
 		bpy.context.scene.objects.link(self.object) # add to current scene
@@ -256,15 +297,22 @@ class Mesh:
 class Vertex:
 	def __init__(self):
 		self.position = [0, 0, 0]
+		self.uv = [0, 0]
 		# what are the other values saved?
 	
 	def loadFromRhm(self, file):
 		bindata = file.read(32) # a vertex is 32 bytes long.
 		if len(bindata) < 32:
 			return False, "Unexpected End of File"
-		data = struct.unpack("3f20x", bindata) # 3 floats and 20 unknown bytes
+		data = struct.unpack("3f12x2H4x", bindata) # 3 floats (position), 12 unknown bytes, 2 unsigned? shorts (UV) and another 4 unknown/unused bytes (always 0)
 		for i in range(3):
 			self.position[i] = data[i]
+		shortSize = pow(2, 16)
+		for i in range(2):
+			# negative position (offset) so I don't need to change it when I figure out the other 12 bytes (neat, huh?)
+			# I normalize the value to [0.0, 1.0] - I guess that's correct?
+			self.uv[i] = halfToFloat(data[-2+i])
+		self.uv[1] = 1 - self.uv[1] # flip Y
 		return True, ""
 
 UnhandledGeometryKeys = []
